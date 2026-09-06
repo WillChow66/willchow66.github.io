@@ -27,6 +27,7 @@
   }
 
   function show(marker) {
+    if (selected === marker && !tooltip.hidden) return;
     dismiss();
     const box = marker.getBoundingClientRect();
     const point = { bubbles: true, clientX: box.left + box.width / 2,
@@ -56,7 +57,7 @@
   root.addEventListener('click', event => {
     event.preventDefault();
     event.stopImmediatePropagation();
-    const marker = event.target.closest?.(markerSelector);
+    const marker = event.target.closest?.(markerSelector) || nearestMarker(event);
     if (marker) show(marker); else dismiss();
   }, true);
   root.addEventListener('auxclick', event => {
@@ -73,11 +74,31 @@
     }
   }, true);
   root.addEventListener('pointerleave', dismiss);
-  root.addEventListener('pointermove', () => {
-    // Resume the native hover label once the pointer moves after a click.
-    tooltip.hidden = true;
-    if (selected) selected.removeAttribute('aria-describedby');
-    selected = null;
+  // Like a canvas hit test, accept a pointer within 10 CSS pixels of a dot.
+  // Tiny markers and overlapping visits should not require pixel-perfect aim.
+  function nearestMarker(event) {
+    let nearest = null;
+    let distance = 10 * 10;
+    root.querySelectorAll(markerSelector).forEach(marker => {
+      const box = marker.getBoundingClientRect();
+      if (!box.width || !box.height) return;
+      const dx = event.clientX - box.left - box.width / 2;
+      const dy = event.clientY - box.top - box.height / 2;
+      const candidate = dx * dx + dy * dy;
+      if (candidate <= distance) { distance = candidate; nearest = marker; }
+    });
+    return nearest;
+  }
+  root.addEventListener('pointermove', event => {
+    const marker = nearestMarker(event);
+    if (marker) show(marker); else dismiss();
+  });
+  root.addEventListener('mousemove', event => {
+    // Keep only our readable tooltip after the provider handles real movement.
+    // Synthetic events in show() must first be allowed to produce its label.
+    if (event.isTrusted && selected) {
+      nativeTips().forEach(tip => { tip.style.display = 'none'; });
+    }
   });
   root.addEventListener('focusout', dismiss);
   document.addEventListener('pointerdown', event => {
