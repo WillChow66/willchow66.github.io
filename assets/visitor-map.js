@@ -1,73 +1,104 @@
-// No tracking or network requests until the owner's statistics service is connected.
-const root = document.getElementById('visitor-map');
-const endpoint = root?.dataset.endpoint?.trim();
+// Keep MapMyVisitors' live city data and hover behavior, without outbound links.
+(function () {
+  'use strict';
+  const root = document.querySelector('#visitor-map .visitor-map-widget');
+  if (!root) return;
+  const markerSelector = '.jvectormap-marker, .mmvstarker';
+  const tooltip = document.createElement('div');
+  tooltip.className = 'visitor-map-tooltip';
+  tooltip.id = 'visitor-map-tooltip';
+  tooltip.setAttribute('role', 'tooltip');
+  tooltip.hidden = true;
+  root.append(tooltip);
+  let selected = null;
 
-async function start() {
-  const service = new URL(endpoint);
-  if (service.protocol !== 'https:') return;
-  const base = service.href.replace(/\/$/, '');
-  if (navigator.doNotTrack !== '1' && navigator.globalPrivacyControl !== true) {
-    // Empty body: location must come from trusted server metadata, not the client.
-    try {
-      await fetch(`${base}/hit`, {
-        method: 'POST', credentials: 'omit', referrerPolicy: 'no-referrer',
-        signal: AbortSignal.timeout(5000)
-      });
-    } catch { /* Reading the existing map can still work if counting fails. */ }
+  function nativeTips() {
+    return [...document.querySelectorAll('.jvectormap-tip')];
   }
-  const [mapResponse, statsResponse] = await Promise.all([
-    fetch(new URL('./land-points.json', import.meta.url)),
-    fetch(`${base}/points`, {
-      credentials: 'omit', referrerPolicy: 'no-referrer',
-      signal: AbortSignal.timeout(8000)
-    })
-  ]);
-  if (!mapResponse.ok || !statsResponse.ok) return;
-  const land = await mapResponse.json();
-  const stats = await statsResponse.json();
-  if (!Array.isArray(stats.points) || !Number.isSafeInteger(stats.views) || stats.views < 0) return;
-  const points = stats.points.filter(p =>
-    Number.isFinite(p.lon) && p.lon >= -180 && p.lon <= 180 &&
-    Number.isFinite(p.lat) && p.lat >= -90 && p.lat <= 90 &&
-    Number.isSafeInteger(p.views) && p.views > 0
-  );
-  const canvas = root.querySelector('canvas');
-  const ctx = canvas.getContext('2d');
-  if (!ctx) return;
-  const countries = new Set(points.map(p => p.country).filter(Boolean)).size;
-  const caption = `${stats.views.toLocaleString()} page views · ${countries} ${countries === 1 ? 'country' : 'countries'}`;
-  root.querySelector('.visitor-map-caption').textContent = caption;
-  canvas.setAttribute('aria-label', `${caption}. Locations are approximate; views are not unique visitors.`);
-  const list = root.querySelector('.visitor-map-locations');
-  points.sort((a, b) => b.views - a.views).forEach(p => {
-    const item = document.createElement('li');
-    item.textContent = `${[p.city, p.country].filter(Boolean).join(', ') || 'Unknown location'}: ${p.views.toLocaleString()} ${p.views === 1 ? 'view' : 'views'}`;
-    list.append(item);
+
+  function dismiss() {
+    tooltip.hidden = true;
+    if (selected) {
+      selected.removeAttribute('aria-describedby');
+      selected.dispatchEvent(new MouseEvent('mouseout', { bubbles: true }));
+      selected = null;
+    }
+    nativeTips().forEach(tip => { tip.style.display = 'none'; });
+  }
+
+  function show(marker) {
+    dismiss();
+    const box = marker.getBoundingClientRect();
+    const point = { bubbles: true, clientX: box.left + box.width / 2,
+      clientY: box.top + box.height / 2, view: window };
+    // Let the widget produce its own label; do not invent visitor data or
+    // depend on its private API. This also enables a tap or keyboard action.
+    marker.dispatchEvent(new MouseEvent('mouseover', point));
+    marker.dispatchEvent(new MouseEvent('mousemove', point));
+    const label = nativeTips().find(tip => tip.textContent.trim() &&
+      getComputedStyle(tip).display !== 'none')?.textContent.trim() ||
+      marker.getAttribute('title');
+    if (!label) return;
+    selected = marker;
+    tooltip.textContent = label;
+    tooltip.hidden = false;
+    marker.setAttribute('aria-label', label);
+    marker.setAttribute('aria-describedby', tooltip.id);
+    const bounds = root.getBoundingClientRect();
+    const left = box.left + box.width / 2 - bounds.left - tooltip.offsetWidth / 2;
+    tooltip.style.left = `${Math.max(0, Math.min(left, bounds.width - tooltip.offsetWidth))}px`;
+    tooltip.style.top = `${box.top - bounds.top - tooltip.offsetHeight - 8}px`;
+    nativeTips().forEach(tip => { tip.style.display = 'none'; });
+  }
+
+  // Capture only activation events. Pointer movement and the provider's
+  // mouseover handlers continue to work normally.
+  root.addEventListener('click', event => {
+    event.preventDefault();
+    event.stopImmediatePropagation();
+    const marker = event.target.closest?.(markerSelector);
+    if (marker) show(marker); else dismiss();
+  }, true);
+  root.addEventListener('auxclick', event => {
+    event.preventDefault();
+    event.stopImmediatePropagation();
+  }, true);
+  root.addEventListener('keydown', event => {
+    if (event.key === 'Escape') { dismiss(); return; }
+    const marker = event.target.closest?.(markerSelector);
+    if (marker && (event.key === 'Enter' || event.key === ' ')) {
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      show(marker);
+    }
+  }, true);
+  root.addEventListener('pointerleave', dismiss);
+  root.addEventListener('pointermove', () => {
+    // Resume the native hover label once the pointer moves after a click.
+    tooltip.hidden = true;
+    if (selected) selected.removeAttribute('aria-describedby');
+    selected = null;
   });
-  root.querySelector('details').hidden = points.length === 0;
-  root.hidden = false;
-  function draw() {
-    const width = root.clientWidth;
-    const height = width * 150 / 360;
-    const ratio = Math.min(window.devicePixelRatio || 1, 3);
-    canvas.width = Math.round(width * ratio);
-    canvas.height = Math.round(height * ratio);
-    ctx.setTransform(ratio, 0, 0, ratio, 0, 0);
-    const project = (lon, lat) => [(lon + 180) / 360 * width, (90 - lat) / 150 * height];
-    const dot = (lon, lat, radius) => {
-      const [x, y] = project(lon, lat);
-      ctx.beginPath(); ctx.arc(x, y, radius, 0, Math.PI * 2); ctx.fill();
-    };
-    ctx.fillStyle = '#d4d6d8';
-    land.forEach(([lon, lat]) => dot(lon, lat, Math.max(.65, width / 620)));
-    points.filter(p => p.lat >= -60).forEach(p => {
-      const r = Math.min(6, 1.7 + Math.log2(p.views + 1) * .55);
-      ctx.fillStyle = 'rgba(8,117,154,.15)'; dot(p.lon, p.lat, r + 2);
-      ctx.fillStyle = '#08759a'; dot(p.lon, p.lat, r);
+  root.addEventListener('focusout', dismiss);
+  document.addEventListener('pointerdown', event => {
+    if (!root.contains(event.target)) dismiss();
+  });
+
+  function prepareWidget() {
+    // The provider inserts its anchor and markers asynchronously. Removing
+    // href also prevents opening statistics from the context menu.
+    root.querySelectorAll('a[href]').forEach(link => {
+      link.removeAttribute('href');
+      link.removeAttribute('target');
+    });
+    root.querySelectorAll(markerSelector).forEach(marker => {
+      marker.setAttribute('tabindex', '0');
+      marker.setAttribute('role', 'button');
+      if (!marker.hasAttribute('aria-label')) {
+        marker.setAttribute('aria-label', 'Show visitor location and visits');
+      }
     });
   }
-  draw();
-  new ResizeObserver(draw).observe(root);
-}
-
-if (endpoint) start().catch(() => { root.hidden = true; });
+  new MutationObserver(prepareWidget).observe(root, { childList: true, subtree: true });
+  prepareWidget();
+})();
