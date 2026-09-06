@@ -1,0 +1,4 @@
+User-agent: *
+Allow: /
+
+Sitemap: https://willchow66.github.io/sitemap.xml
